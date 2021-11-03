@@ -1,3 +1,3 @@
 # Polygen-Mesh-Reconstruction-Algorithms
 Marching Cube Algorithm
-![Chair](https://github.com/foollh/Polygen-Mesh-Reconstruction-Algorithms/blob/main/img/chair.png)
+![Chair1](https://github.com/foollh/Polygen-Mesh-Reconstruction-Algorithms/blob/main/img/scatter_chair.png)![Chair2](https://github.com/foollh/Polygen-Mesh-Reconstruction-Algorithms/blob/main/img/mc_chair.png)
