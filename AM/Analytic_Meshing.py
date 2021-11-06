@@ -1,8 +1,11 @@
 import onnx
 import torch
 import torch.nn as nn
+import numpy as np
 from onnx import numpy_helper
 import onnxruntime
+from matplotlib import pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
 
 
 def data_generate(step):
@@ -65,20 +68,24 @@ class ChairMLP(nn.Module):
         x = self.relu(self.lin2(x))
         index2, wl2, bias2 = neuron_state(x, self.lin2.weight.data, self.lin2.bias.data)
         alk2_w = torch.index_select(wl1.mm(self.lin2.weight.data.t()), 1, index2)
-        alk2_b = torch.index_select(bias1.mm(self.lin2.weight.data.t())+self.lin2.bias.data.unsqueeze(0), 1, index2)
+        alk2_b = torch.index_select(bias1.mm(self.lin2.weight.data.t()) + self.lin2.bias.data.unsqueeze(0), 1, index2)
         alk2 = torch.cat((alk2_w, alk2_b), dim=0)
         x = self.relu(self.lin3(x))
         index3, wl3, bias3 = neuron_state(x, self.lin3.weight.data, self.lin3.bias.data)
         alk3_w = torch.index_select(wl1.mm(wl2).mm(self.lin3.weight.data.t()), 1, index3)
-        alk3_b = torch.index_select((bias1.mm(wl2)+bias2).mm(self.lin3.weight.data.t())+self.lin3.bias.data.unsqueeze(0), 1, index3)
+        alk3_b = torch.index_select(
+            (bias1.mm(wl2) + bias2).mm(self.lin3.weight.data.t()) + self.lin3.bias.data.unsqueeze(0), 1, index3)
         alk3 = torch.cat((alk3_w, alk3_b), dim=0)
         x = self.relu(self.lin4(x))
         index4, wl4, bias4 = neuron_state(x, self.lin4.weight.data, self.lin4.bias.data)
         alk4_w = torch.index_select(wl1.mm(wl2).mm(wl3).mm(self.lin4.weight.data.t()), 1, index4)
-        alk4_b = torch.index_select(((bias1.mm(wl2) + bias2).mm(wl3) + bias3).mm(self.lin4.weight.data.t())+self.lin4.bias.data.unsqueeze(0), 1, index4)
+        alk4_b = torch.index_select(
+            ((bias1.mm(wl2) + bias2).mm(wl3) + bias3).mm(self.lin4.weight.data.t()) + self.lin4.bias.data.unsqueeze(0),
+            1, index4)
         alk4 = torch.cat((alk4_w, alk4_b), dim=0)
         x = self.lin5(x)
-        zerosurface_b = (((bias1.mm(wl2)+bias2).mm(wl3)+bias3).mm(wl4)+bias4).mm(self.lin5.weight.data.t())+self.lin5.bias.data.unsqueeze(0)
+        zerosurface_b = (((bias1.mm(wl2) + bias2).mm(wl3) + bias3).mm(wl4) + bias4).mm(
+            self.lin5.weight.data.t()) + self.lin5.bias.data.unsqueeze(0)
         zerosurface_w = wl1.mm(wl2).mm(wl3).mm(wl4).mm(self.lin5.weight.data.t())
         zerosurface = torch.cat((zerosurface_w, zerosurface_b), dim=0)
 
@@ -97,12 +104,56 @@ def model_onnx(inputs, onnxpath):
     return ort_outs
 
 
-def vertex():
-    pass
+def vertex(hyperplanes):
+    zeroface = hyperplanes[-1]
+    hyp1 = hyperplanes[-2][:, 1].unsqueeze(1)
+    hyp2 = hyperplanes[-3][:, 0].unsqueeze(1)
+    W = np.concatenate((zeroface[:-1].numpy(), hyp1[:-1].numpy(), hyp2[:-1].numpy()), axis=1).transpose()
+    B = np.concatenate(
+        (zeroface[-1].unsqueeze(1).numpy(), hyp1[-1].unsqueeze(1).numpy(), hyp2[-1].unsqueeze(1).numpy()), axis=0)
+    W_inv = np.linalg.inv(W)
+
+    return np.matmul(W_inv, -B)
 
 
-if __name__ == '__main__':
-    onnxpath = 'chair.onnx'
+def plot_3D(step, hyperplanes, value, vert):
+    fig = plt.figure()
+    # ax = fig.gca(projection='3d')
+    ax = Axes3D(fig)
+
+    # Make data.
+    X = np.arange(-0.5, 0.5, 2 / step)
+    Y = np.arange(-0.5, 0.5, 2 / step)
+    X, Y = np.meshgrid(X, Y)
+
+    def Z_value(hyperplane):
+        Z = (-hyperplane[3].numpy() - hyperplane[0].numpy() * X - hyperplane[1].numpy() * Y) / \
+            hyperplane[2].numpy()
+        return Z
+
+    # Plot the surface.
+    ax.plot_surface(X, Y,
+                    Z=Z_value(hyperplanes[-1]), color='g')
+    # ax.plot_surface(X, Y,
+    #                 Z=Z_value(hyperplanes[-2][:, 1]), color='#BBFFFF')
+    # ax.plot_surface(X, Y,
+    #                 Z=Z_value(hyperplanes[-3][:, 0]), color='#BBFFFF')
+
+    ax.scatter(value[0].numpy(), value[1].numpy(), value[2].numpy(), s=200, c='#000000', marker='o')
+    ax.scatter(vert[0], vert[1], vert[2], s=200, c='b', marker='o')
+
+    ax.set_xlabel(r'$x$', fontsize=20)
+    ax.set_ylabel(r'$y$', fontsize=20)
+    ax.set_zlabel(r'$z$', fontsize=20)
+    ax.set_xlim(-0.5, 0.5)
+    ax.set_ylim(-0.5, 0.5)
+    ax.set_zlim(-0.5, 0.5)
+
+    plt.show()
+
+
+def main():
+    onnxpath = '../chair.onnx'
     # load model
     model = onnx.load(onnxpath)
     # checker model
@@ -115,19 +166,25 @@ if __name__ == '__main__':
     for param in net.parameters():
         param.requires_grad = False
 
-    step = 10  # 空间步长
+    step = 20  # 空间步长
     inputs = data_generate(step)
     outs = torch.zeros([step ** 3])
     inputs_valid = []
     for i in range(step ** 3):
         out = model_onnx(inputs[i].unsqueeze(0), onnxpath)
 
-        if abs(out[0]) <= 0.1:
+        if abs(out[0]) <= 0.01:
             inputs_valid.append(inputs[i])
 
     for idx, value in enumerate(inputs_valid):
         out, hyperplanes = net(value.unsqueeze(0))
+        return hyperplanes, value
 
-        # solve vertex
 
-        print(len(hyperplanes))
+if __name__ == '__main__':
+    planes, value = main()
+
+    # solve vertex
+    vert = vertex(planes)
+
+    plot_3D(10, planes, value, vert)
