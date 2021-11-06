@@ -7,7 +7,7 @@ from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from skimage import measure
 
 # 'AnalyticMesh/examples/chair.onnx'
-onnxpath = 'chair.onnx'
+onnxpath = '../chair.onnx'
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
 
