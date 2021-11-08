@@ -3,20 +3,6 @@ import torch
 import torch.nn as nn
 import numpy as np
 from onnx import numpy_helper
-import onnxruntime
-from matplotlib import pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
-
-
-def data_generate(step):
-    num = torch.linspace(-1, 1, steps=step)
-    Xs = num.repeat_interleave(step ** 2).unsqueeze(0)
-    Ys = num.repeat_interleave(step)
-    Ys = Ys.repeat(step).unsqueeze(0)
-    Zs = num.repeat(step ** 2).unsqueeze(0)
-
-    data = torch.cat((Xs, Ys, Zs), dim=0)
-    return data.t()
 
 
 # load weight of every layer
@@ -92,64 +78,41 @@ class ChairMLP(nn.Module):
         return x, [alk1, alk2, alk3, alk4, zerosurface]
 
 
-def to_numpy(tensor):
-    return tensor.detach().cpu().numpy() if tensor.requires_grad else tensor.cpu().numpy()
-
-
-def model_onnx(inputs, onnxpath):
-    ort_session = onnxruntime.InferenceSession(onnxpath)
-    # ONNX RUNTIME
-    ort_inputs = {ort_session.get_inputs()[0].name: to_numpy(inputs)}
-    ort_outs = ort_session.run(None, ort_inputs)  # list.
-    return ort_outs
-
-
-def vertex(hyperplanes):
+def vertex(point, hyperplanes, threshold):
+    point = np.expand_dims(point, axis=1)
+    verts = point
     zeroface = hyperplanes[-1]
-    hyp1 = hyperplanes[-2][:, 1].unsqueeze(1)
-    hyp2 = hyperplanes[-3][:, 0].unsqueeze(1)
-    W = np.concatenate((zeroface[:-1].numpy(), hyp1[:-1].numpy(), hyp2[:-1].numpy()), axis=1).transpose()
-    B = np.concatenate(
-        (zeroface[-1].unsqueeze(1).numpy(), hyp1[-1].unsqueeze(1).numpy(), hyp2[-1].unsqueeze(1).numpy()), axis=0)
-    W_inv = np.linalg.inv(W)
 
-    return np.matmul(W_inv, -B)
+    def solve(hyp1, hyp2):
+        # hyp1 = hyperplanes[-2][:, p1].unsqueeze(1)
+        # hyp2 = hyperplanes[-3][:, p2].unsqueeze(1)
+        W = np.concatenate((zeroface[:-1].numpy(), hyp1[:-1].numpy(), hyp2[:-1].numpy()), axis=1).transpose()
+        B = np.concatenate(
+            (zeroface[-1].unsqueeze(1).numpy(), hyp1[-1].unsqueeze(1).numpy(), hyp2[-1].unsqueeze(1).numpy()), axis=0)
+        W_inv = np.linalg.inv(W)
+        vert = np.matmul(W_inv, -B)
+        return vert
 
+    def three_hyper(p1, p2, p3, verts):
+        vert1 = solve(hyperplanes[-3][:, p1].unsqueeze(1), hyperplanes[-2][:, p2].unsqueeze(1))
+        vert2 = solve(hyperplanes[-3][:, p1].unsqueeze(1), hyperplanes[-2][:, p3].unsqueeze(1))
+        vert3 = solve(hyperplanes[-2][:, p2].unsqueeze(1), hyperplanes[-2][:, p3].unsqueeze(1))
+        if np.linalg.norm(vert1 - point) < threshold and np.linalg.norm(vert2 - point) < threshold and np.linalg.norm(
+                vert3 - point) < threshold:
+            verts = np.concatenate((verts, vert1), axis=1)
+            verts = np.concatenate((verts, vert2), axis=1)
+            verts = np.concatenate((verts, vert3), axis=1)
+            return True, verts
+        else:
+            return False, verts
 
-def plot_3D(step, hyperplanes, value, vert):
-    fig = plt.figure()
-    # ax = fig.gca(projection='3d')
-    ax = Axes3D(fig)
-
-    # Make data.
-    X = np.arange(-0.5, 0.5, 2 / step)
-    Y = np.arange(-0.5, 0.5, 2 / step)
-    X, Y = np.meshgrid(X, Y)
-
-    def Z_value(hyperplane):
-        Z = (-hyperplane[3].numpy() - hyperplane[0].numpy() * X - hyperplane[1].numpy() * Y) / \
-            hyperplane[2].numpy()
-        return Z
-
-    # Plot the surface.
-    ax.plot_surface(X, Y,
-                    Z=Z_value(hyperplanes[-1]), color='g')
-    # ax.plot_surface(X, Y,
-    #                 Z=Z_value(hyperplanes[-2][:, 1]), color='#BBFFFF')
-    # ax.plot_surface(X, Y,
-    #                 Z=Z_value(hyperplanes[-3][:, 0]), color='#BBFFFF')
-
-    ax.scatter(value[0].numpy(), value[1].numpy(), value[2].numpy(), s=200, c='#000000', marker='o')
-    ax.scatter(vert[0], vert[1], vert[2], s=200, c='b', marker='o')
-
-    ax.set_xlabel(r'$x$', fontsize=20)
-    ax.set_ylabel(r'$y$', fontsize=20)
-    ax.set_zlabel(r'$z$', fontsize=20)
-    ax.set_xlim(-0.5, 0.5)
-    ax.set_ylim(-0.5, 0.5)
-    ax.set_zlim(-0.5, 0.5)
-
-    plt.show()
+    for p1 in range(len(hyperplanes[-3][0, :])):
+        for p2 in range(len(hyperplanes[-2][0, :]) - 1):
+            for p3 in range(p2 + 1, len(hyperplanes[-2][0, :])):
+                result, verts = three_hyper(p1, p2, p3, verts)
+                if result:
+                    return verts.transpose()
+    return verts.transpose()
 
 
 def main():
@@ -166,25 +129,20 @@ def main():
     for param in net.parameters():
         param.requires_grad = False
 
-    step = 20  # 空间步长
-    inputs = data_generate(step)
-    outs = torch.zeros([step ** 3])
-    inputs_valid = []
-    for i in range(step ** 3):
-        out = model_onnx(inputs[i].unsqueeze(0), onnxpath)
+    inputs_valid = np.load("surface_points.npy")
+    AM_surface = np.zeros([1, 3])
+    threshold = 0.1
 
-        if abs(out[0]) <= 0.01:
-            inputs_valid.append(inputs[i])
-
-    for idx, value in enumerate(inputs_valid):
-        out, hyperplanes = net(value.unsqueeze(0))
-        return hyperplanes, value
+    for value in inputs_valid[1:]:
+        out, hyperplanes = net(torch.from_numpy(value).unsqueeze(0).float())
+        verts = vertex(value, hyperplanes, threshold)  # array(4, 3)
+        AM_surface = np.concatenate((AM_surface, verts[1:]), axis=0)
+    return AM_surface
 
 
 if __name__ == '__main__':
-    planes, value = main()
+    AM_sur = main()  # point:array(3,)  plane:list(5)
 
-    # solve vertex
-    vert = vertex(planes)
+    np.save('AM_surface.npy', AM_sur)
 
-    plot_3D(10, planes, value, vert)
+    # plot_3D(AM_sur, hyperplanes=None)
