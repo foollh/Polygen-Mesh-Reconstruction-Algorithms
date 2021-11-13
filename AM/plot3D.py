@@ -4,18 +4,9 @@ from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from mpl_toolkits.mplot3d import Axes3D
 
 
-def plot_3D(verts, hyperplanes=None, step=30):
-    fig = plt.figure()
-    # ax = fig.gca(projection='3d')
-    # ax = Axes3D(fig)
-    faces = np.arange(0, len(verts[1:]))
-    faces = faces.reshape((-1, 3))
-
+def plot_3D(verts, hyperplanes=None, step=10):
+    fig = plt.figure(1)
     ax = fig.add_subplot(111, projection='3d')
-
-    mesh = Poly3DCollection(verts[1:][faces], alpha=1)
-    mesh.set_edgecolor('k')
-    ax.add_collection3d(mesh)
 
     # # 绘制超平面和顶点
     # X = np.arange(-1, 1, 1 / (10 * step))
@@ -35,10 +26,36 @@ def plot_3D(verts, hyperplanes=None, step=30):
     #     #                 Z=Z_value(hyperplanes[-2][:, 1]), color='#BBFFFF')
     #     # ax.plot_surface(X, Y,
     #     #                 Z=Z_value(hyperplanes[-3][:, 0]), color='#BBFFFF')
-    #
-    # # ax.scatter(verts[0][0], verts[0][1], verts[0][2], s=20, c='r', marker='o')
-    # for vert in verts[1:]:
-    #     ax.scatter(vert[0], vert[1], vert[2], s=2, c='b', marker='o')
+
+    # scatter
+    # Xs = np.zeros([0])
+    # Ys = np.zeros([0])
+    # Zs = np.zeros([0])
+    # for i in range(len(verts)):
+    #     # if len(verts[i][0, :]) > 3:
+    #     #     dis = np.zeros(len(verts[i][0]) - 1)
+    #     #     for i, v in enumerate(verts[i][:, 1:].transpose()):
+    #     #         dis[i] = np.linalg.norm(verts[i][:, 0] - v)
+    #     #     verts = verts[i][:, dis.argsort()][:, -3:]
+    #     pass
+    #     x = verts[i][0]
+    #     y = verts[i][1]
+    #     z = verts[i][2]
+    #     Xs = np.concatenate((Xs, x))
+    #     Ys = np.concatenate((Ys, y))
+    #     Zs = np.concatenate((Zs, z))
+    # ax.scatter(Xs, Ys, Zs, s=1, c='b', marker='o')
+    # # ax.scatter(verts[i][:, 0][0], verts[i][:, 0][1], verts[i][:, 0][2], s=2, c='r', marker='o')
+
+    # polygen mesh
+    compact = []
+    for i in range(len(verts)):
+        if len(verts[i][0, :]) > 3:
+            compact.append(verts[i])
+    for i in range(len(compact)):
+        mesh = Poly3DCollection(compact[i].transpose()[1:], alpha=0.5)
+        mesh.set_edgecolor('k')
+        ax.add_collection3d(mesh)
 
     ax.set_xlabel(r'$x$', fontsize=20)
     ax.set_ylabel(r'$y$', fontsize=20)
@@ -46,13 +63,38 @@ def plot_3D(verts, hyperplanes=None, step=30):
     ax.set_xlim(-1, 1)
     ax.set_ylim(-1, 1)
     ax.set_zlim(-1, 1)
+    # ax.set_xlim(-0.4, -0.38)
+    # ax.set_ylim(-0.3, 0.3)
+    # ax.set_zlim(-0.3, 0.3)
 
     plt.show()
 
 
-if __name__ == "__main__":
-    AM_sur = np.load('AM_surface.npy')
+def plot_scatter(inputs_valid):
+    fig = plt.figure(1)
+    ax = fig.add_subplot(111, projection='3d')
 
+    X = inputs_valid[:, 0]
+    Y = inputs_valid[:, 1]
+    Z = inputs_valid[:, 2]
+
+    ax.scatter3D(X, Y, Z, s=1, c='b', marker='o')
+    ax.set_xlim(-1, 1)
+    ax.set_ylim(-1, 1)
+    ax.set_zlim(-1, 1)
+    plt.show()
+
+
+def to_numpy(tensor):
+    return tensor.detach().cpu().numpy() if tensor.requires_grad else tensor.cpu().numpy()
+
+
+if __name__ == "__main__":
+    AM_sur = np.load('AM_surface.npy', allow_pickle=True).item()
+
+    surface_points = np.load('surface_points.npy')
+
+    # plot_scatter(surface_points)
     plot_3D(AM_sur, hyperplanes=None)
 
 

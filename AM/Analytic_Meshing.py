@@ -1,4 +1,7 @@
+# analytic meshing algorithm for the chair.onnx
+# output: the vertices of mesh
 import onnx
+import time
 import torch
 import torch.nn as nn
 import numpy as np
@@ -21,7 +24,7 @@ def neuron_state(x, weight, bias):
     for i in index.data:
         s[i] = 1
     wl_bias = torch.mm(torch.diag(s), torch.cat((weight, bias.unsqueeze(1)), dim=1))
-    return index, wl_bias[:, 0:-1].t(), wl_bias[:, -1].unsqueeze(0)
+    return s, wl_bias[:, :-1].t(), wl_bias[:, -1].unsqueeze(0)
 
 
 class ChairMLP(nn.Module):
@@ -47,27 +50,25 @@ class ChairMLP(nn.Module):
 
     def forward(self, input):
         x = self.relu(self.lin1(input))
-        index1, wl1, bias1 = neuron_state(x, self.lin1.weight.data, self.lin1.bias.data)
-        alk1_w = torch.index_select(self.lin1.weight.data.t(), 1, index1)
-        alk1_b = torch.index_select(self.lin1.bias.data.unsqueeze(0), 1, index1)
+        s1, wl1, bias1 = neuron_state(x, self.lin1.weight.data, self.lin1.bias.data)
+        alk1_w = self.lin1.weight.data.t()  # torch.index_select(self.lin1.weight.data.t(), 1, index1)
+        alk1_b = self.lin1.bias.data.unsqueeze(0)  # torch.index_select(self.lin1.bias.data.unsqueeze(0), 1, index1)
         alk1 = torch.cat((alk1_w, alk1_b), dim=0)
         x = self.relu(self.lin2(x))
-        index2, wl2, bias2 = neuron_state(x, self.lin2.weight.data, self.lin2.bias.data)
-        alk2_w = torch.index_select(wl1.mm(self.lin2.weight.data.t()), 1, index2)
-        alk2_b = torch.index_select(bias1.mm(self.lin2.weight.data.t()) + self.lin2.bias.data.unsqueeze(0), 1, index2)
+        s2, wl2, bias2 = neuron_state(x, self.lin2.weight.data, self.lin2.bias.data)
+        alk2_w = wl1.mm(self.lin2.weight.data.t())
+        alk2_b = bias1.mm(self.lin2.weight.data.t()) + self.lin2.bias.data.unsqueeze(0)
         alk2 = torch.cat((alk2_w, alk2_b), dim=0)
         x = self.relu(self.lin3(x))
-        index3, wl3, bias3 = neuron_state(x, self.lin3.weight.data, self.lin3.bias.data)
-        alk3_w = torch.index_select(wl1.mm(wl2).mm(self.lin3.weight.data.t()), 1, index3)
-        alk3_b = torch.index_select(
-            (bias1.mm(wl2) + bias2).mm(self.lin3.weight.data.t()) + self.lin3.bias.data.unsqueeze(0), 1, index3)
+        s3, wl3, bias3 = neuron_state(x, self.lin3.weight.data, self.lin3.bias.data)
+        alk3_w = wl1.mm(wl2).mm(self.lin3.weight.data.t())
+        alk3_b = (bias1.mm(wl2) + bias2).mm(self.lin3.weight.data.t()) + self.lin3.bias.data.unsqueeze(0)
         alk3 = torch.cat((alk3_w, alk3_b), dim=0)
         x = self.relu(self.lin4(x))
-        index4, wl4, bias4 = neuron_state(x, self.lin4.weight.data, self.lin4.bias.data)
-        alk4_w = torch.index_select(wl1.mm(wl2).mm(wl3).mm(self.lin4.weight.data.t()), 1, index4)
-        alk4_b = torch.index_select(
-            ((bias1.mm(wl2) + bias2).mm(wl3) + bias3).mm(self.lin4.weight.data.t()) + self.lin4.bias.data.unsqueeze(0),
-            1, index4)
+        s4, wl4, bias4 = neuron_state(x, self.lin4.weight.data, self.lin4.bias.data)
+        alk4_w = wl1.mm(wl2).mm(wl3).mm(self.lin4.weight.data.t())
+        alk4_b = ((bias1.mm(wl2) + bias2).mm(wl3) + bias3).mm(
+            self.lin4.weight.data.t()) + self.lin4.bias.data.unsqueeze(0)
         alk4 = torch.cat((alk4_w, alk4_b), dim=0)
         x = self.lin5(x)
         zerosurface_b = (((bias1.mm(wl2) + bias2).mm(wl3) + bias3).mm(wl4) + bias4).mm(
@@ -75,44 +76,53 @@ class ChairMLP(nn.Module):
         zerosurface_w = wl1.mm(wl2).mm(wl3).mm(wl4).mm(self.lin5.weight.data.t())
         zerosurface = torch.cat((zerosurface_w, zerosurface_b), dim=0)
 
-        return x, [alk1, alk2, alk3, alk4, zerosurface]
+        S = torch.cat((s1.unsqueeze(1), s2.unsqueeze(1), s3.unsqueeze(1), s4.unsqueeze(1)), dim=-1)
+
+        return x, [S.t(), alk1, alk2, alk3, alk4, zerosurface]
 
 
-def vertex(point, hyperplanes, threshold):
-    point = np.expand_dims(point, axis=1)
+def distance_condition(hyperplanes, point):
+    planes = torch.Tensor([])
+    condition_matrices = torch.Tensor([])
+    for idx, hyper in enumerate(hyperplanes[1:-1]):
+        hyper_act = torch.mm(torch.diag(hyperplanes[0][idx]), hyper.t())
+        hyper_act = hyper_act[~(hyper_act == 0).all(1)]
+        planes = torch.cat((planes, hyper_act), dim=0)
+
+        matrix = torch.mm(torch.eye(len(hyper[0])) - 2 * torch.diag(hyperplanes[0][idx]), hyper.t())
+        condition_matrices = torch.cat((condition_matrices, matrix), dim=0)
+
+    planes = planes.t()
+    planes_points = -planes[-1] / planes[-2]
+    planes_points = torch.cat((torch.zeros([2, len(planes_points)]), planes_points.unsqueeze(0)), dim=0)
+    vectors = point - planes_points.numpy()
+    l2 = np.linalg.norm(planes[:-1].numpy(), axis=0)
+    distances = abs(np.sum(vectors * planes[:-1].numpy() / l2, axis=0))
+    indices = distances.argsort()
+    return planes[:, indices], condition_matrices
+
+
+def vertex(point, hyperplanes, hyper_nozero, condition_matrix, threshold):
+    point = np.expand_dims(point, axis=1)  # array:(3, 1)
     verts = point
-    zeroface = hyperplanes[-1]
 
     def solve(hyp1, hyp2):
-        # hyp1 = hyperplanes[-2][:, p1].unsqueeze(1)
-        # hyp2 = hyperplanes[-3][:, p2].unsqueeze(1)
-        W = np.concatenate((zeroface[:-1].numpy(), hyp1[:-1].numpy(), hyp2[:-1].numpy()), axis=1).transpose()
+        # hyp1 = hyper_nozero[-2][:, p1].unsqueeze(1)  # Tensor:(4, 1)
+        # hyp2 = hyper_nozero[-3][:, p2].unsqueeze(1)  # Tensor:(4, 1)
+        W = np.concatenate((hyperplanes[-1][:-1].numpy(), hyp1[:-1].numpy(), hyp2[:-1].numpy()), axis=1).transpose()
         B = np.concatenate(
-            (zeroface[-1].unsqueeze(1).numpy(), hyp1[-1].unsqueeze(1).numpy(), hyp2[-1].unsqueeze(1).numpy()), axis=0)
+            (hyperplanes[-1][-1].unsqueeze(1).numpy(), hyp1[-1].unsqueeze(1).numpy(), hyp2[-1].unsqueeze(1).numpy()),
+            axis=0)
         W_inv = np.linalg.inv(W)
         vert = np.matmul(W_inv, -B)
         return vert
 
-    def three_hyper(p1, p2, p3, verts):
-        vert1 = solve(hyperplanes[-3][:, p1].unsqueeze(1), hyperplanes[-2][:, p2].unsqueeze(1))
-        vert2 = solve(hyperplanes[-3][:, p1].unsqueeze(1), hyperplanes[-2][:, p3].unsqueeze(1))
-        vert3 = solve(hyperplanes[-2][:, p2].unsqueeze(1), hyperplanes[-2][:, p3].unsqueeze(1))
-        if np.linalg.norm(vert1 - point) < threshold and np.linalg.norm(vert2 - point) < threshold and np.linalg.norm(
-                vert3 - point) < threshold:
-            verts = np.concatenate((verts, vert1), axis=1)
-            verts = np.concatenate((verts, vert2), axis=1)
-            verts = np.concatenate((verts, vert3), axis=1)
-            return True, verts
-        else:
-            return False, verts
-
-    for p1 in range(len(hyperplanes[-3][0, :])):
-        for p2 in range(len(hyperplanes[-2][0, :]) - 1):
-            for p3 in range(p2 + 1, len(hyperplanes[-2][0, :])):
-                result, verts = three_hyper(p1, p2, p3, verts)
-                if result:
-                    return verts.transpose()
-    return verts.transpose()
+    for i in range(len(hyper_nozero[0]) - 1):
+        vert = solve(hyper_nozero[:, i].unsqueeze(1), hyper_nozero[:, i + 1].unsqueeze(1))
+        # justify satisfy the condition or not
+        if (np.matmul(condition_matrix[:, :-1].numpy(), vert) + condition_matrix[:, -1].unsqueeze(1).numpy() <= threshold).all():
+            verts = np.concatenate((verts, vert), axis=1)
+    return verts
 
 
 def main():
@@ -130,19 +140,25 @@ def main():
         param.requires_grad = False
 
     inputs_valid = np.load("surface_points.npy")
-    AM_surface = np.zeros([1, 3])
+    AM_surface = {}
+    idx = 0
     threshold = 0.1
 
     for value in inputs_valid[1:]:
         out, hyperplanes = net(torch.from_numpy(value).unsqueeze(0).float())
-        verts = vertex(value, hyperplanes, threshold)  # array(4, 3)
-        AM_surface = np.concatenate((AM_surface, verts[1:]), axis=0)
+        # calculate the distance between hyperplanes and point
+        hyper_nozero, condition_matrix = distance_condition(hyperplanes, np.expand_dims(value, axis=1))  # array(4, *)
+
+        verts = vertex(value, hyperplanes, hyper_nozero, condition_matrix, threshold)  # array(3, *)
+        AM_surface.update({idx: verts})
+        idx += 1
+
     return AM_surface
 
 
 if __name__ == '__main__':
-    AM_sur = main()  # point:array(3,)  plane:list(5)
-
+    start_time = time.time()
+    AM_sur = main()  # point:array(3,)  plane:list(6)
+    end_time = time.time()
+    print(end_time-start_time)
     np.save('AM_surface.npy', AM_sur)
-
-    # plot_3D(AM_sur, hyperplanes=None)

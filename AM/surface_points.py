@@ -1,3 +1,5 @@
+# obtain the surface points of chair from chair.onnx
+# output:surface_points.npy
 import numpy as np
 import torch.onnx
 import onnxruntime
@@ -30,8 +32,8 @@ def model_onnx(inputs):
 
 
 if __name__ == '__main__':
-    step = 30  # 空间步长
-    threshold = 0.1
+    step = 60  # 空间步长
+    threshold = 0.05
     inputs = data_generate(step)
     inputs_valid = np.zeros([1, 3])
     for i in range(step**3):
